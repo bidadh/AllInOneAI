@@ -27,6 +27,7 @@ const {
   truncateText,
 } = require('./prompts');
 const BaseClient = require('./BaseClient');
+const { spendTokens } = require('~/models/spendTokens');
 
 const loc = process.env.GOOGLE_LOC || 'us-central1';
 const publisher = 'google';
@@ -700,14 +701,23 @@ class GoogleClient extends BaseClient {
 
       const delay = modelName.includes('flash') ? 8 : 15;
       const result = await client.generateContentStream(requestOptions);
+      // let last = 0;
+      let metadata = {};
       for await (const chunk of result.stream) {
         const chunkText = chunk.text();
         await this.generateTextStream(chunkText, onProgress, {
           delay,
         });
+        metadata = chunk.usageMetadata;
+        // last = metadata.totalTokenCount;
         reply += chunkText;
         await sleep(streamRate);
       }
+      const promptTokens = metadata.promptTokenCount;
+      const completionTokens = metadata.candidatesTokenCount;
+      let tokens = { promptTokens, completionTokens };
+      logger.info('recording token usage for tokens: ', tokens);
+      await this.recordTokenUsage(tokens);
       return reply;
     }
 
@@ -737,6 +747,38 @@ class GoogleClient extends BaseClient {
 
     return reply;
   }
+
+  async recordTokenUsage({ promptTokens, completionTokens, usage, context = 'message' }) {
+    await spendTokens(
+      {
+        context,
+        model: this.modelOptions.model,
+        conversationId: this.conversationId,
+        user: this.user ?? this.options.req.user?.id,
+        endpointTokenConfig: this.options.endpointTokenConfig,
+      },
+      { promptTokens, completionTokens },
+    );
+
+    if (
+      usage &&
+      typeof usage === 'object' &&
+      'reasoning_tokens' in usage &&
+      typeof usage.reasoning_tokens === 'number'
+    ) {
+      await spendTokens(
+        {
+          context: 'reasoning',
+          model: this.modelOptions.model,
+          conversationId: this.conversationId,
+          user: this.user ?? this.options.req.user?.id,
+          endpointTokenConfig: this.options.endpointTokenConfig,
+        },
+        { completionTokens: usage.reasoning_tokens },
+      );
+    }
+  }
+
 
   /**
    * Stripped-down logic for generating a title. This uses the non-streaming APIs, since the user does not see titles streaming
